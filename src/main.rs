@@ -1,4 +1,4 @@
-use std::{str::FromStr, path::PathBuf, fs, io::Cursor};
+use std::{str::FromStr, path::{PathBuf, Path}, fs, io::Cursor};
 
 use image::ImageOutputFormat;
 use rayon::iter::{ParallelIterator, IntoParallelIterator};
@@ -56,13 +56,6 @@ fn resize_image(input: &[u8], output: &mut Cursor<Vec<u8>>, w: u32, h: u32, f: i
 }
 
 fn sync_version(src: PathBuf, dst: PathBuf, width: u32, height: u32, filter: image::imageops::FilterType) -> Result<(), self::Error>{
-    let parent = dst.parent();
-    if let Some(p) = parent {
-        if !p.try_exists()? {
-            _ = fs::create_dir_all(p)?;
-        }
-    }
-
     let input = fs::read(src)?;
     let mut output = Cursor::new(vec![]);
     _ = resize_image(&input, &mut output, width, height, filter)?;
@@ -71,13 +64,6 @@ fn sync_version(src: PathBuf, dst: PathBuf, width: u32, height: u32, filter: ima
 }
 
 async fn async_version(srcname: PathBuf, dstname: PathBuf, w: u32, h: u32, f: image::imageops::FilterType) -> Result<(), self::Error>{
-    let parent = dstname.parent();
-    if let Some(p) = parent {
-        if !p.try_exists()? {
-            _ = fs::create_dir_all(p)?;
-        }
-    }
-
     let input = tokio::fs::read(srcname).await?;
     
     let output = tokio::task::spawn_blocking(move || async move {
@@ -92,14 +78,18 @@ async fn async_version(srcname: PathBuf, dstname: PathBuf, w: u32, h: u32, f: im
     Ok(())
 }
 
-fn list_all(src: &str, dst: &str, extension: &str, list: &mut Vec<(PathBuf, PathBuf)>) -> Result<(), Error>{
+fn prepare(src: &str, dst: &str, extension: &str, list: &mut Vec<(PathBuf, PathBuf)>) -> Result<(), Error>{
+    if !Path::new(dst).try_exists()? {
+        _ = fs::create_dir_all(dst)?;
+    }
+
     let entries = std::fs::read_dir(&src)?;
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
             let out = PathBuf::from_str(dst).unwrap().join(path.file_name().unwrap().to_str().unwrap());
-            _ = list_all(path.to_str().unwrap(), out.to_str().unwrap(), extension, list)?;
+            _ = prepare(path.to_str().unwrap(), out.to_str().unwrap(), extension, list)?;
         } else {
             let ext = path.extension();
             if let Some(ext) = ext {
@@ -122,7 +112,7 @@ pub async fn main() -> Result<(), self::Error>{
     let Args { src, dst, width, height, extension, filter, asynchronous } = Args::from_args();
     
     let mut list = vec![];
-    list_all(&src, &dst, &extension, &mut list)?;
+    prepare(&src, &dst, &extension, &mut list)?;
 
     let f = filter.into();
     if asynchronous {
