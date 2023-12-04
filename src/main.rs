@@ -1,7 +1,7 @@
-use std::{str::FromStr, path::{PathBuf, Path}, fs, io::Cursor};
+use std::{str::FromStr, path::PathBuf, fs, io::Cursor};
 
 use image::ImageOutputFormat;
-use rayon::iter::{ParallelBridge, ParallelIterator};
+use rayon::iter::{ParallelIterator, IntoParallelIterator};
 use structopt::StructOpt;
 
 /// the purpose of this tool is to create image thumbnails in bulk an attempt to maxize the
@@ -18,6 +18,11 @@ struct Args {
     /// Height of the generated thumbnails
     #[structopt(short, long, default_value="150")]
     height: u32,
+    /// Not all files should be considered when processing the images. Actually, we only want to
+    /// process those files having a specific extension and leave out all the others. This flag
+    /// allows you to set the only extension to use for that purpose.
+    #[structopt(short, long, default_value="tiff")]
+    extension: String,
     /// The find of filter to use when creating the thumbnails. 
     /// Can be either of: 'nearest' (default), 'triangle', 'gaussian', 'catmull-rom', 'lanczos3'
     /// The fastest algo is 'nearest' which iterpolates nearest pixels.
@@ -50,46 +55,29 @@ fn resize_image(input: &[u8], output: &mut Cursor<Vec<u8>>, w: u32, h: u32, f: i
     Ok(())
 }
 
-fn par_sync_version(src: &str, dst: &str, width: u32, height: u32, filter: image::imageops::FilterType) -> Result<(), self::Error>{
-    let entries = std::fs::read_dir(&src)?;
-    entries.par_bridge().for_each(|e| {
-        let entry = e.unwrap();
-        let srcname = entry.path();
+fn sync_version(src: PathBuf, dst: PathBuf, width: u32, height: u32, filter: image::imageops::FilterType) -> Result<(), self::Error>{
+    let parent = dst.parent();
+    if let Some(p) = parent {
+        if !p.try_exists()? {
+            _ = fs::create_dir_all(p)?;
+        }
+    }
 
-        let fstem = srcname.file_stem().map(|x| x.to_str()).unwrap_or_default().unwrap_or("unk");
-        let dstname = PathBuf::from(&dst).join(format!("{fstem}.jpg"));
-        
-        let input = fs::read(srcname).unwrap();
-        let mut output = Cursor::new(vec![]);
-        _ = resize_image(&input, &mut output, width, height, filter).unwrap();
-        fs::write(dstname, output.into_inner()).unwrap();
-    });
+    let input = fs::read(src)?;
+    let mut output = Cursor::new(vec![]);
+    _ = resize_image(&input, &mut output, width, height, filter)?;
+    fs::write(dst, output.into_inner())?;
     Ok(())
 }
 
-
-async fn full_async_version(src: &str, dst: &str, width: u32, height: u32, filter: image::imageops::FilterType) -> Result<(), self::Error>{
-    let mut handles = vec![];
-    let mut entries = tokio::fs::read_dir(&src).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let srcname = entry.path();
-
-        let fstem = srcname.file_stem().map(|x| x.to_str()).unwrap_or_default().unwrap_or("unk");
-        let dstname = PathBuf::from(&dst).join(format!("{fstem}.jpg"));
-        
-        let handle = tokio::task::spawn(async move {
-            _ = process_one(srcname, dstname, width, height, filter).await.unwrap()
-        });
-        handles.push(handle);
+async fn async_version(srcname: PathBuf, dstname: PathBuf, w: u32, h: u32, f: image::imageops::FilterType) -> Result<(), self::Error>{
+    let parent = dstname.parent();
+    if let Some(p) = parent {
+        if !p.try_exists()? {
+            _ = fs::create_dir_all(p)?;
+        }
     }
-    // join 'em all
-    for handle in handles {
-        handle.await?;
-    }
-    Ok(())
-}
 
-async fn process_one(srcname: PathBuf, dstname: PathBuf, w: u32, h: u32, f: image::imageops::FilterType) -> Result<(), self::Error>{
     let input = tokio::fs::read(srcname).await?;
     
     let output = tokio::task::spawn_blocking(move || async move {
@@ -104,18 +92,53 @@ async fn process_one(srcname: PathBuf, dstname: PathBuf, w: u32, h: u32, f: imag
     Ok(())
 }
 
+fn list_all(src: &str, dst: &str, extension: &str, list: &mut Vec<(PathBuf, PathBuf)>) -> Result<(), Error>{
+    let entries = std::fs::read_dir(&src)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let out = PathBuf::from_str(dst).unwrap().join(path.file_name().unwrap().to_str().unwrap());
+            _ = list_all(path.to_str().unwrap(), out.to_str().unwrap(), extension, list)?;
+        } else {
+            let ext = path.extension();
+            if let Some(ext) = ext {
+                if ext.eq_ignore_ascii_case(extension) {
+                    let fstem = path.file_stem().map(|x| x.to_str()).unwrap_or_default().unwrap_or("unk");
+                    let dstname = PathBuf::from(&dst).join(format!("{fstem}.jpg"));
+                    
+                    list.push((path, dstname));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 
 #[tokio::main]
 pub async fn main() -> Result<(), self::Error>{
-    let Args { src, dst, width, height, filter, asynchronous } = Args::from_args();
+    let Args { src, dst, width, height, extension, filter, asynchronous } = Args::from_args();
     
-    if !Path::new(&dst).exists() {
-        std::fs::create_dir(&dst)?;
-    }
+    let mut list = vec![];
+    list_all(&src, &dst, &extension, &mut list)?;
+
+    let f = filter.into();
     if asynchronous {
-        full_async_version(&src, &dst, width, height, filter.into()).await?;
+        let mut tasks = vec![];
+        for (s,d) in list {
+            let task = tokio::spawn(async_version(s, d, width, height, f));
+            tasks.push(task);
+        }
+        
+        for task in tasks {
+            _ = task.await?;
+        }
     } else {
-        par_sync_version(&src, &dst, width, height, filter.into())?;
+        list.into_par_iter().for_each(|(s, d)| {
+            _ = sync_version(s, d, width, height, f).unwrap();
+        });
     }
     
     Ok(())
