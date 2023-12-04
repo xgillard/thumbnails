@@ -21,7 +21,7 @@ struct Args {
     /// Not all files should be considered when processing the images. Actually, we only want to
     /// process those files having a specific extension and leave out all the others. This flag
     /// allows you to set the only extension to use for that purpose.
-    #[structopt(short, long, default_value="tiff")]
+    #[structopt(short, long, default_value="tif")]
     extension: String,
     /// The find of filter to use when creating the thumbnails. 
     /// Can be either of: 'nearest' (default), 'triangle', 'gaussian', 'catmull-rom', 'lanczos3'
