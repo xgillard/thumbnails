@@ -22,6 +22,9 @@ struct Args {
     /// Limits the number of concurrent futures running at the same time.
     #[structopt(short, long, default_value="10")]
     limit: usize,
+    ///
+    #[structopt(short, long)]
+    threads: Option<usize>,
     /// Not all files should be considered when processing the images. Actually, we only want to
     /// process those files having a specific extension and leave out all the others. This flag
     /// allows you to set the only extension to use for that purpose.
@@ -113,7 +116,7 @@ fn prepare(src: &str, dst: &str, extension: &str, list: &mut Vec<(PathBuf, PathB
 }
 
 pub fn main() -> Result<(), self::Error>{
-    let Args { src, dst, width, height, limit, extension, filter, asynchronous } = Args::from_args();
+    let Args { src, dst, width, height, threads, limit, extension, filter, asynchronous } = Args::from_args();
     
     let mut list = vec![];
     prepare(&src, &dst, &extension, &mut list)?;
@@ -153,7 +156,7 @@ pub fn main() -> Result<(), self::Error>{
             Result::<(), self::Error>::Ok(())
         });
 
-        let cpu = num_cpus::get();
+        let cpu = threads.unwrap_or_else(num_cpus::get);
         std::thread::scope(|s| {
             let mut threads = vec![];
             for _ in 0..cpu {
